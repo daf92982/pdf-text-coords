@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF 文字座標擷取器</title>
+<style>
+:root{--bg:#f5f7fa;--panel:#fff;--ink:#16202c;--mute:#5d6b7a;--line:#d5dce4;--acc:#0b5fff;--box:rgba(11,95,255,.14)}
+@media (prefers-color-scheme:dark){:root{--bg:#10151b;--panel:#18202a;--ink:#e8edf2;--mute:#93a1b0;--line:#2b3744;--acc:#6ea0ff;--box:rgba(110,160,255,.2)}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Noto Sans TC",system-ui,sans-serif}
+header{padding:20px 24px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{margin:0;font-size:1.3rem}
+header p{margin:4px 0 0;color:var(--mute)}
+.bar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 24px}
+button,label.btn{font:inherit;padding:7px 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);cursor:pointer}
+button.primary,label.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button:focus-visible,label.btn:focus-within,input:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+input[type=file]{position:absolute;opacity:0;width:1px;height:1px}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;padding:0 24px 24px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:auto;max-height:80vh}
+#stage{position:relative;margin:12px auto;width:max-content}
+#stage canvas{display:block}
+.tb{position:absolute;background:var(--box);border:1px solid var(--acc);cursor:pointer}
+.tb.on{background:rgba(255,160,0,.35);border-color:#e08a00}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel)}
+tr.on{background:var(--box)}
+td.t{white-space:normal;min-width:90px}
+#msg{color:var(--mute);padding:12px}
+</style>
+</head>
+<body>
+<header>
+<h1>PDF 文字座標擷取器</h1>
+<p>選一份 PDF，取得每段文字的內容與文字框四個角落座標。檔案只在你的瀏覽器處理，不會上傳。</p>
+</header>
+<div class="bar">
+<label class="btn primary">選擇 PDF<input id="file" type="file" accept="application/pdf"></label>
+<label>頁碼 <select id="page"></select></label>
+<label>座標原點 <select id="origin"><option value="bl">左下（PDF 原生）</option><option value="tl">左上（網頁／影像）</option></select></label>
+<button id="json">下載 JSON</button>
+<button id="csv">下載 CSV</button>
+</div>
+<main>
+<div class="panel"><div id="msg">尚未載入 PDF。</div><div id="stage" hidden></div></div>
+<div class="panel"><table id="tbl"><thead><tr><th>#</th><th>文字</th><th>左下</th><th>右下</th><th>右上</th><th>左上</th></tr></thead><tbody></tbody></table></div>
+</main>
+<script src="libs/pdf.min.js"></script>
+<script>
+const $=id=>document.getElementById(id), SCALE=1.4;
+let pdf=null, items=[], pageH=0, pageNo=1;
+
+async function initWorker(){
+  const src='libs/pdf.worker.min.js';
+  try{const t=await (await fetch(src)).text();
+    pdfjsLib.GlobalWorkerOptions.workerSrc=URL.createObjectURL(new Blob([t],{type:'text/javascript'}));
+  }catch(e){pdfjsLib.GlobalWorkerOptions.workerSrc=src}
+}
+const ready=initWorker();
+
+$('file').onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  await ready; $('msg').hidden=false; $('msg').textContent='讀取中…';
+  try{
+    pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;
+    $('page').innerHTML=Array.from({length:pdf.numPages},(_,i)=>`<option value="${i+1}">${i+1} / ${pdf.numPages}</option>`).join('');
+    await load(1);
+  }catch(err){$('msg').textContent='無法讀取這個檔案：'+err.message}
+};
+$('page').onchange=()=>load(+$('page').value);
+$('origin').onchange=()=>fill();
+
+async function load(n){
+  pageNo=n;
+  const page=await pdf.getPage(n), vp=page.getViewport({scale:SCALE});
+  const [x0,y0,x1,y1]=page.view; pageH=y1-y0;
+  const cv=document.createElement('canvas'); cv.width=vp.width; cv.height=vp.height;
+  await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+  const st=$('stage'); st.innerHTML=''; st.appendChild(cv); st.hidden=false; $('msg').hidden=true;
+  const tc=await page.getTextContent(); items=[];
+  tc.items.forEach(it=>{
+    if(!it.str.trim()) return;
+    const [a,b,,,e,f]=it.transform, th=Math.atan2(b,a), c=Math.cos(th), s=Math.sin(th);
+    const w=it.width, h=it.height||Math.hypot(a,b);
+    const p0=[e,f], p1=[e+w*c,f+w*s], p2=[p1[0]-h*s,p1[1]+h*c], p3=[e-h*s,f+h*c];
+    items.push({text:it.str, font:it.fontName, corners:{bl:p0,br:p1,tr:p2,tl:p3}});
+  });
+  items.forEach((it,i)=>{
+    const pts=Object.values(it.corners).map(([x,y])=>vp.convertToViewportPoint(x,y));
+    const xs=pts.map(p=>p[0]), ys=pts.map(p=>p[1]), d=document.createElement('div');
+    d.className='tb'; d.dataset.i=i;
+    Object.assign(d.style,{left:Math.min(...xs)+'px',top:Math.min(...ys)+'px',width:Math.max(...xs)-Math.min(...xs)+'px',height:Math.max(...ys)-Math.min(...ys)+'px'});
+    d.onclick=()=>pick(i,true); st.appendChild(d);
+  });
+  fill();
+}
+const conv=([x,y])=>{const r=$('origin').value==='tl'?pageH-y:y; return [+x.toFixed(2),+r.toFixed(2)]};
+function fill(){
+  $('tbl').tBodies[0].innerHTML=items.map((it,i)=>{
+    const c=it.corners, cell=k=>conv(c[k]).join(', ');
+    return `<tr data-i="${i}"><td>${i+1}</td><td class="t"></td><td>${cell('bl')}</td><td>${cell('br')}</td><td>${cell('tr')}</td><td>${cell('tl')}</td></tr>`;
+  }).join('');
+  [...$('tbl').tBodies[0].rows].forEach((r,i)=>{r.cells[1].textContent=items[i].text; r.onclick=()=>pick(i,false)});
+}
+function pick(i,scroll){
+  document.querySelectorAll('.on').forEach(n=>n.classList.remove('on'));
+  const b=document.querySelector(`.tb[data-i="${i}"]`), r=$('tbl').tBodies[0].rows[i];
+  b&&b.classList.add('on'); if(r){r.classList.add('on'); if(scroll) r.scrollIntoView({block:'center'})}
+}
+function dl(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click()}
+function rows(){return items.map((it,i)=>({index:i+1,page:pageNo,text:it.text,
+  bottom_left:conv(it.corners.bl),bottom_right:conv(it.corners.br),top_right:conv(it.corners.tr),top_left:conv(it.corners.tl)}))}
+$('json').onclick=()=>items.length&&dl(`page${pageNo}-text-coords.json`,JSON.stringify({origin:$('origin').value,unit:'pt',items:rows()},null,2),'application/json');
+$('csv').onclick=()=>{ if(!items.length) return;
+  const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
+  const head='index,page,text,bl_x,bl_y,br_x,br_y,tr_x,tr_y,tl_x,tl_y';
+  const body=rows().map(r=>[r.index,r.page,q(r.text),...r.bottom_left,...r.bottom_right,...r.top_right,...r.top_left].join(','));
+  dl(`page${pageNo}-text-coords.csv`,'\ufeff'+[head,...body].join('\n'),'text/csv')};
+</script>
+</body>
+</html>
